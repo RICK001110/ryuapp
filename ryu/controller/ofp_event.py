@@ -84,5 +84,12 @@ class EventOFPStateChange(event.EventBase):
     def __init__(self, dp):
         super(EventOFPStateChange, self).__init__()
         self.datapath = dp
-
+class EventWIAPAPathCalculation(event.EventBase):
+    def __init__(self,msg):
+        super(EventWIAPAPathCalculation, self).__init__()
+        self.msg = msg
+class EventWIAPACommandIn(event.EventBase):
+    def __init__(self,msg):
+        super(EventWIAPACommandIn, self).__init__()
+        self.msg = msg
 handler.register_service('ryu.controller.ofp_handler')

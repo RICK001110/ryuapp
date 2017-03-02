@@ -30,6 +30,7 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
+from ryu.lib.packet import ipv6
 from ryu.lib.packet import arp
 from ryu.lib import hub
 
@@ -38,7 +39,7 @@ from ryu.topology.api import get_switch, get_link
 import setting
 
 
-CONF = cfg.CONF
+#CONF = cfg.CONF
 
 
 class NetworkAwareness(app_manager.RyuApp):
@@ -57,16 +58,18 @@ class NetworkAwareness(app_manager.RyuApp):
         self.name = "awareness"
         self.link_to_port = {}       # (src_dpid,dst_dpid)->(src_port,dst_port)
         self.access_table = {}       # {(sw,port) :[host1_ip]}
+        self.access_table_IPv6 = {}  # {(sw,port) :[host1_ipv6]}
         self.switch_port_table = {}  # dpip->port_num
         self.access_ports = {}       # dpid->port_num
-        self.interior_ports = {}     # dpid->port_num
+        self.interior_ports = {}     # dpid->port_num 
 
-        self.graph = nx.DiGraph()
+        self.graph = nx.DiGraph()       
         self.pre_graph = nx.DiGraph()
         self.pre_access_table = {}
+        self.pre_access_table_IPv6 = {}
         self.pre_link_to_port = {}
-        self.shortest_paths = None
-
+        self.shortest_paths = None      
+        self.event_brick = None
         # Start a green thread to discover network resource.
         self.discover_thread = hub.spawn(self._discover)
 
@@ -75,6 +78,11 @@ class NetworkAwareness(app_manager.RyuApp):
         while True:
             self.show_topology()
             if i == 5:
+#                msg = "I get a Event!"
+#                event_WIAPA = ofp_event.EventWIAPAPathCalculation(msg)
+#                self.event_brick = app_manager.lookup_service_brick('ofp_event')
+#                self.event_brick.send_event_to_observers(event_WIAPA, MAIN_DISPATCHER)
+#                self.logger.info("I send a Event!")
                 self.get_topology(None)
                 i = 0
             hub.sleep(setting.DISCOVERY_PERIOD)
@@ -115,8 +123,13 @@ class NetworkAwareness(app_manager.RyuApp):
             Get host location info:(datapath, port) according to host ip.
         """
         for key in self.access_table.keys():
-            if self.access_table[key][0] == host_ip:
+            if self.access_table[key] == host_ip:
                 return key
+        for key in self.access_table_IPv6.keys():
+            if self.access_table_IPv6[key] == host_ip:
+                return key
+        if host_ip == "0.0.0.0" or host_ip == "255.255.255.255":
+            return None
         self.logger.info("%s location is not found." % host_ip)
         return None
 
@@ -189,7 +202,7 @@ class NetworkAwareness(app_manager.RyuApp):
             for path in generator:
                 if k <= 0:
                     break
-                shortest_paths.append(path)
+                shortest_paths.append(path)                             
                 k -= 1
             return shortest_paths
         except:
@@ -232,7 +245,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.create_access_ports()
         self.get_graph(self.link_to_port.keys())
         self.shortest_paths = self.all_k_shortest_paths(
-            self.graph, weight='weight', k=CONF.k_paths)
+            self.graph, weight='weight', k=2)
 
     def register_access_info(self, dpid, in_port, ip, mac):
         """
@@ -240,16 +253,34 @@ class NetworkAwareness(app_manager.RyuApp):
         """
         if in_port in self.access_ports[dpid]:
             if (dpid, in_port) in self.access_table:
-                if self.access_table[(dpid, in_port)] == (ip, mac):
+                if self.access_table[(dpid, in_port)] == ip:
                     return
                 else:
-                    self.access_table[(dpid, in_port)] = (ip, mac)
+                    self.access_table[(dpid, in_port)] = ip
                     return
             else:
                 self.access_table.setdefault((dpid, in_port), None)
-                self.access_table[(dpid, in_port)] = (ip, mac)
+                self.access_table[(dpid, in_port)] = ip
                 return
-
+    def register_access_info_v6(self, dpid, in_port, ip, mac):
+        """
+            Register access host info into access table.
+        """
+        self.logger.info("1111")
+        if in_port in self.access_ports[dpid]:
+            
+            if (dpid, in_port) in self.access_table_IPv6:
+                if self.access_table_IPv6[(dpid, in_port)] == ip:
+                    return
+                else:
+                    self.access_table_IPv6[(dpid, in_port)] = ip
+                    self.logger.info("success register")
+                    return
+            else:
+                self.access_table_IPv6.setdefault((dpid, in_port), None)
+                self.access_table_IPv6[(dpid, in_port)] = ip
+                
+                return
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         """
@@ -265,18 +296,27 @@ class NetworkAwareness(app_manager.RyuApp):
         eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
-
-        if arp_pkt:
-            arp_src_ip = arp_pkt.src_ip
-            arp_dst_ip = arp_pkt.dst_ip
-            mac = arp_pkt.src_mac
-
+        ipv6_pkt = pkt.get_protocol(ipv6.ipv6)
+        
+        if ipv6_pkt:
+            ipv6_src_ip = ipv6_pkt.src
+            ipv6_dst_ip = ipv6_pkt.dst
+            mac = None
+#            if arp_src_ip == "192.168.1.106" or arp_dst_ip == "192.168.1.106":
+#                return
             # Record the access info
-            self.register_access_info(datapath.id, in_port, arp_src_ip, mac)
-
+            self.logger.info("ipv6 host record")
+            self.register_access_info_v6(datapath.id, in_port, ipv6_src_ip, mac)
+        if arp_pkt:
+            src_ip = arp_pkt.src_ip
+            dst_ip = arp_pkt.dst_ip
+            mac = None
+            self.logger.info("ipv4 host record %s" %src_ip)
+            self.register_access_info(datapath.id, in_port, src_ip, mac)     
+                   
     def show_topology(self):
         switch_num = len(self.graph.nodes())
-        if self.pre_graph != self.graph and setting.TOSHOW:
+        if setting.TOSHOW:#self.pre_graph != self.graph
             print "---------------------Topo Link---------------------"
             print '%10s' % ("switch"),
             for i in self.graph.nodes():
@@ -289,7 +329,7 @@ class NetworkAwareness(app_manager.RyuApp):
                 print ""
             self.pre_graph = copy.deepcopy(self.graph)
 
-        if self.pre_link_to_port != self.link_to_port and setting.TOSHOW:
+        if setting.TOSHOW:#self.pre_link_to_port != self.link_to_port and 
             print "---------------------Link Port---------------------"
             print '%10s' % ("switch"),
             for i in self.graph.nodes():
@@ -305,7 +345,7 @@ class NetworkAwareness(app_manager.RyuApp):
                 print ""
             self.pre_link_to_port = copy.deepcopy(self.link_to_port)
 
-        if self.pre_access_table != self.access_table and setting.TOSHOW:
+        if setting.TOSHOW:#self.pre_access_table != self.access_table and 
             print "----------------Access Host-------------------"
             print '%10s' % ("switch"), '%12s' % "Host"
             if not self.access_table.keys():
@@ -314,3 +354,12 @@ class NetworkAwareness(app_manager.RyuApp):
                 for tup in self.access_table:
                     print '%10d:    ' % tup[0], self.access_table[tup]
             self.pre_access_table = copy.deepcopy(self.access_table)
+        if setting.TOSHOW:#self.pre_access_table_IPv6 != self.access_table_IPv6 and 
+            print "----------------Access Host IPv6-------------------"
+            print '%10s' % ("switch"), '%12s' % "Host"
+            if not self.access_table_IPv6.keys():
+                print "    NO found host"
+            else:
+                for tup in self.access_table_IPv6:
+                    print '%10d:    ' % tup[0], self.access_table_IPv6[tup]
+            self.pre_access_table_IPv6 = copy.deepcopy(self.access_table_IPv6)

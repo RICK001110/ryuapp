@@ -29,6 +29,7 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
+from ryu.lib.packet import ipv6
 from ryu.lib.packet import arp
 
 from ryu.topology import event, switches
@@ -39,7 +40,7 @@ import network_monitor
 import network_delay_detector
 
 
-CONF = cfg.CONF
+#CONF = cfg.CONF
 
 
 class ShortestForwarding(app_manager.RyuApp):
@@ -53,32 +54,30 @@ class ShortestForwarding(app_manager.RyuApp):
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {
-        "network_awareness": network_awareness.NetworkAwareness,
-        "network_monitor": network_monitor.NetworkMonitor,
-        "network_delay_detector": network_delay_detector.NetworkDelayDetector}
+        "network_awareness": network_awareness.NetworkAwareness}
 
-    WEIGHT_MODEL = {'hop': 'weight', 'delay': "delay", "bw": "bw"}
+#    WEIGHT_MODEL = {'hop': 'weight', 'delay': "delay", "bw": "bw"}
 
     def __init__(self, *args, **kwargs):
         super(ShortestForwarding, self).__init__(*args, **kwargs)
         self.name = 'shortest_forwarding'
         self.awareness = kwargs["network_awareness"]
-        self.monitor = kwargs["network_monitor"]
-        self.delay_detector = kwargs["network_delay_detector"]
+#        self.monitor = kwargs["network_monitor"]
+#        self.delay_detector = kwargs["network_delay_detector"]
         self.datapaths = {}
-        self.weight = self.WEIGHT_MODEL[CONF.weight]
+        self.weight = 'weight'#self.WEIGHT_MODEL[CONF.weight]
 
     def set_weight_mode(self, weight):
         """
             set weight mode of path calculating.
         """
         self.weight = weight
-        if self.weight == self.WEIGHT_MODEL['hop']:
+        if 1:#self.weight == self.WEIGHT_MODEL['hop']:
             self.awareness.get_shortest_paths(weight=self.weight)
         return True
 
     @set_ev_cls(ofp_event.EventOFPStateChange,
-                [MAIN_DISPATCHER, DEAD_DISPATCHER])
+                [MAIN_DISPATCHER, DEAD_DISPATCHER]) 
     def _state_change_handler(self, ev):
         """
             Collect datapath information.
@@ -115,6 +114,7 @@ class ShortestForwarding(app_manager.RyuApp):
         """
         parser = datapath.ofproto_parser
         actions = []
+        actions.append(parser.OFPActionSetQueue(0))
         actions.append(parser.OFPActionOutput(dst_port))
 
         match = parser.OFPMatch(
@@ -122,8 +122,46 @@ class ShortestForwarding(app_manager.RyuApp):
             ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
+                      idle_timeout=0, hard_timeout=0)
+
+    def send_flow_mod_v6(self, datapath, flow_info, src_port, dst_port):
+        """
+            Build flow entry, and send it to datapath.
+        """
+        parser = datapath.ofproto_parser
+        actions = []
+        actions_1 = []
+        actions.append(parser.OFPActionSetQueue(1))
+        actions.append(parser.OFPActionOutput(dst_port))
+        actions_1.append(parser.OFPActionSetQueue(0))
+        actions_1.append(parser.OFPActionOutput(dst_port))
+        match = parser.OFPMatch(
+            in_port=src_port, eth_type=flow_info[0],
+            ipv6_src=flow_info[1], ipv6_dst=flow_info[2], ipv6_flabel = 0x01)
+        match_1 = parser.OFPMatch(
+            in_port=src_port, eth_type=flow_info[0],
+            ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
+        self.add_flow(datapath, 2, match, actions,
+                      idle_timeout=0, hard_timeout=0)
+        self.add_flow(datapath, 1, match_1, actions_1,
+                      idle_timeout=0, hard_timeout=0)
+
+    def send_flow_mod_WIAPA(self, datapath, flow_info, src_port, dst_port):
+        """
+            Build flow entry, and send it to datapath.
+        """
+        parser = datapath.ofproto_parser
+        actions = []
+        actions.append(parser.OFPActionOutput(dst_port))
+
+        match = parser.OFPMatch(
+            in_port=src_port, eth_type=flow_info[0],
+            ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
+
+        self.add_flow(datapath, 1000, match, actions,
                       idle_timeout=15, hard_timeout=60)
 
+        
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         """
             Build packet out object.
@@ -155,14 +193,14 @@ class ShortestForwarding(app_manager.RyuApp):
     def get_port(self, dst_ip, access_table):
         """
             Get access port if dst host.
-            access_table: {(sw,port) :(ip, mac)}
+            access_table: {(sw,port) : ip}
         """
         if access_table:
-            if isinstance(access_table.values()[0], tuple):
-                for key in access_table.keys():
-                    if dst_ip == access_table[key][0]:
-                        dst_port = key[1]
-                        return dst_port
+#            if isinstance(access_table.values(), str):
+            for key in access_table.keys():
+                if dst_ip == access_table[key]:
+                    dst_port = key[1]
+                    return dst_port
         return None
 
     def get_port_pair_from_link(self, link_to_port, src_dpid, dst_dpid):
@@ -178,22 +216,28 @@ class ShortestForwarding(app_manager.RyuApp):
 
     def flood(self, msg):
         """
-            Flood ARP packet to the access port
+            Flood packet to the access port
             which has no record of host.
         """
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
+        in_port = msg.match['in_port']
+#        out_port = ofproto.OFPP_FLOOD
+#        actions = [parser.OFPActionOutput(out_port)]
+#        data = msg.data
+#        out = parser.OFPPacketOut(datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER,
+#                                  in_port=in_port, actions=actions, data=data)
+#        datapath.send_msg(out)
         for dpid in self.awareness.access_ports:
             for port in self.awareness.access_ports[dpid]:
                 if (dpid, port) not in self.awareness.access_table.keys():
                     datapath = self.datapaths[dpid]
                     out = self._build_packet_out(
                         datapath, ofproto.OFP_NO_BUFFER,
-                        ofproto.OFPP_CONTROLLER, port, msg.data)
+                        in_port, port, msg.data)
                     datapath.send_msg(out)
-        self.logger.debug("Flooding msg")
+        self.logger.info("Flooding msg")
 
     def arp_forwarding(self, msg, src_ip, dst_ip):
         """ Send ARP packet to the destination host,
@@ -203,7 +247,8 @@ class ShortestForwarding(app_manager.RyuApp):
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
+        if src_ip == "192.168.1.106" or dst_ip == "192.168.1.106":
+            return
         result = self.awareness.get_host_location(dst_ip)
         if result:  # host record in access table.
             datapath_dst, out_port = result[0], result[1]
@@ -212,8 +257,9 @@ class ShortestForwarding(app_manager.RyuApp):
                                          ofproto.OFPP_CONTROLLER,
                                          out_port, msg.data)
             datapath.send_msg(out)
-            self.logger.debug("Reply ARP to knew host")
+            self.logger.info("Reply ARP to knew host")
         else:
+            self.logger.info("flood ipv4")
             self.flood(msg)
 
     def get_path(self, src, dst, weight):
@@ -223,9 +269,9 @@ class ShortestForwarding(app_manager.RyuApp):
         shortest_paths = self.awareness.shortest_paths
         graph = self.awareness.graph
 
-        if weight == self.WEIGHT_MODEL['hop']:
+        if 1:#weight == self.WEIGHT_MODEL['hop']:
             return shortest_paths.get(src).get(dst)[0]
-        elif weight == self.WEIGHT_MODEL['delay']:
+        elif 0:#weight == self.WEIGHT_MODEL['delay']:
             # If paths existed, return it, else calculate it and save it.
             try:
                 paths = shortest_paths.get(src).get(dst)
@@ -237,7 +283,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 shortest_paths.setdefault(src, {})
                 shortest_paths[src].setdefault(dst, paths)
                 return paths[0]
-        elif weight == self.WEIGHT_MODEL['bw']:
+        elif 0:#weight == self.WEIGHT_MODEL['bw']:
             # Because all paths will be calculate
             # when call self.monitor.get_best_path_by_bw
             # So we just need to call it once in a period,
@@ -262,11 +308,12 @@ class ShortestForwarding(app_manager.RyuApp):
         dst_sw = None
 
         src_location = self.awareness.get_host_location(src)
-        if in_port in self.awareness.access_ports[dpid]:
-            if (dpid,  in_port) == src_location:
-                src_sw = src_location[0]
-            else:
-                return None
+        if src_location:
+#        if in_port in self.awareness.access_ports[dpid]:
+#            if (dpid,  in_port) == src_location:
+            src_sw = src_location[0]
+        else:
+            return None
 
         dst_location = self.awareness.get_host_location(dst)
         if dst_location:
@@ -274,6 +321,142 @@ class ShortestForwarding(app_manager.RyuApp):
 
         return src_sw, dst_sw
 
+    def install_flow_v6(self, datapaths, link_to_port, access_table, path,
+                     flow_info, buffer_id, data=None):
+        ''' 
+            Install flow entires for roundtrip: go and back.
+            @parameter: path=[dpid1, dpid2...]
+                        flow_info=(eth_type, src_ip, dst_ip, in_port)
+        '''
+        if path is None or len(path) == 0:
+            self.logger.info("Path error!")
+            return
+        in_port = flow_info[3]
+        first_dp = datapaths[path[0]]
+        out_port = first_dp.ofproto.OFPP_LOCAL
+        back_info = (flow_info[0], flow_info[2], flow_info[1])
+
+        # inter_link
+        if len(path) > 2:
+            for i in xrange(1, len(path)-1):
+                port = self.get_port_pair_from_link(link_to_port,
+                                                    path[i-1], path[i])
+                port_next = self.get_port_pair_from_link(link_to_port,
+                                                         path[i], path[i+1])
+                if port and port_next:
+                    src_port, dst_port = port[1], port_next[0]
+                    datapath = datapaths[path[i]]
+                    self.send_flow_mod_v6(datapath, flow_info, src_port, dst_port)
+                    self.send_flow_mod_v6(datapath, back_info, dst_port, src_port)
+                    self.logger.debug("inter_link flow install")
+        if len(path) > 1:
+            # the last flow entry: tor -> host
+            port_pair = self.get_port_pair_from_link(link_to_port,
+                                                     path[-2], path[-1])
+            if port_pair is None:
+                self.logger.info("Port is not found")
+                return
+            src_port = port_pair[1]
+
+            dst_port = self.get_port(flow_info[2], access_table)
+            if dst_port is None:
+                dst_port = self.get_port(flow_info[2], self.awareness.access_table_IPv6)
+                if dst_port is None:
+                    self.logger.info("Last port is not found.")
+                    return
+
+            last_dp = datapaths[path[-1]]
+            self.send_flow_mod_v6(last_dp, flow_info, src_port, dst_port)
+            self.send_flow_mod_v6(last_dp, back_info, dst_port, src_port)
+
+            # the first flow entry
+            port_pair = self.get_port_pair_from_link(link_to_port,
+                                                     path[0], path[1])
+            if port_pair is None:
+                self.logger.info("Port not found in first hop.")
+                return
+            out_port = port_pair[0]
+            self.send_flow_mod_v6(first_dp, flow_info, in_port, out_port)
+            self.send_flow_mod_v6(first_dp, back_info, out_port, in_port)
+            self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
+
+        # src and dst on the same datapath
+        else:
+            out_port = self.get_port(flow_info[2], access_table)
+            if out_port is None:
+                out_port = self.get_port(flow_info[2], self.awareness.access_table_IPv6)
+                if out_port is None:
+                    self.logger.info("Out_port is None in same dp")
+                    return
+            self.send_flow_mod_v6(first_dp, flow_info, in_port, out_port)
+            self.send_flow_mod_v6(first_dp, back_info, out_port, in_port)
+            self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
+    def install_flow_paths_WIAPA(self, datapaths, link_to_port, access_table, path,
+                     flow_info):
+        ''' 
+            Install flow entires for roundtrip: go and back.
+            @parameter: path=[dpid1, dpid2...]
+                        flow_info=(eth_type, src_ip, dst_ip, in_port)
+        '''
+        if path is None or len(path) == 0:
+            self.logger.info("Path error!")
+            return
+        in_port = flow_info[3]
+        first_dp = datapaths[path[0]]
+        out_port = first_dp.ofproto.OFPP_LOCAL
+        back_info = (flow_info[0], flow_info[2], flow_info[1])
+
+        # inter_link
+        if len(path) > 2:
+            for i in xrange(1, len(path)-1):
+                port = self.get_port_pair_from_link(link_to_port,
+                                                    path[i-1], path[i])
+                port_next = self.get_port_pair_from_link(link_to_port,
+                                                         path[i], path[i+1])
+                if port and port_next:
+                    src_port, dst_port = port[1], port_next[0]
+                    datapath = datapaths[path[i]]
+                    self.send_flow_mod_v6(datapath, flow_info, src_port, dst_port)
+                    self.send_flow_mod_v6(datapath, back_info, dst_port, src_port)
+                    self.logger.info("inter_link flow install")
+        if len(path) > 1:
+            # the last flow entry: tor -> host
+            port_pair = self.get_port_pair_from_link(link_to_port,
+                                                     path[-2], path[-1])
+            if port_pair is None:
+                self.logger.info("Port is not found")
+                return
+            src_port = port_pair[1]
+
+            dst_port = self.get_port(flow_info[2], access_table)
+            if dst_port is None:
+                self.logger.info("Last port is not found.")
+                return
+
+            last_dp = datapaths[path[-1]]
+            self.send_flow_mod_v6(last_dp, flow_info, src_port, dst_port)
+            self.send_flow_mod_v6(last_dp, back_info, dst_port, src_port)
+
+            # the first flow entry
+            port_pair = self.get_port_pair_from_link(link_to_port,
+                                                     path[0], path[1])
+            if port_pair is None:
+                self.logger.info("Port not found in first hop.")
+                return
+            out_port = port_pair[0]
+            self.send_flow_mod_v6(first_dp, flow_info, in_port, out_port)
+            self.send_flow_mod_v6(first_dp, back_info, out_port, in_port)
+#            self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
+
+        # src and dst on the same datapath
+        else:
+            out_port = self.get_port(flow_info[2], access_table)
+            if out_port is None:
+                self.logger.info("Out_port is None in same dp")
+                return
+            self.send_flow_mod_v6(first_dp, flow_info, in_port, out_port)
+            self.send_flow_mod_v6(first_dp, back_info, out_port, in_port)
+#            self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
     def install_flow(self, datapaths, link_to_port, access_table, path,
                      flow_info, buffer_id, data=None):
         ''' 
@@ -350,7 +533,6 @@ class ShortestForwarding(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
-
         result = self.get_sw(datapath.id, in_port, ip_src, ip_dst)
         if result:
             src_sw, dst_sw = result[0], result[1]
@@ -364,7 +546,75 @@ class ShortestForwarding(app_manager.RyuApp):
                                   self.awareness.link_to_port,
                                   self.awareness.access_table, path,
                                   flow_info, msg.buffer_id, msg.data)
+#        if result[0] == None or result[1] == None:
+#            self.logger.info("flood ipv4")
+#            self.flood(msg)
         return
+    def shortest_forwarding_v6(self, msg, eth_type, ip_src, ip_dst):
+        """
+            To calculate shortest forwarding path and install them into datapaths.
+
+        """
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match['in_port']
+#        if ip_src == "192.168.1.106" or ip_dst == "192.168.1.106":
+#            return
+        result = self.get_sw(datapath.id, in_port, ip_src, ip_dst)
+        if result:
+            src_sw, dst_sw = result[0], result[1]
+            if dst_sw:
+                # Path has already calculated, just get it.
+                path = self.get_path(src_sw, dst_sw, weight=self.weight)
+                self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
+                flow_info = (eth_type, ip_src, ip_dst, in_port)
+                # install flow entries to datapath along side the path.
+                self.install_flow_v6(self.datapaths,
+                                  self.awareness.link_to_port,
+                                  self.awareness.access_table, path,
+                                  flow_info, msg.buffer_id, msg.data)
+        if result == None or result[0] == None or result[1] == None:
+            self.logger.info("flood ipv6")
+            self.flood(msg)
+        return
+    def shortest_paths_install_v6(self, eth_type, ip_src, ip_dst):
+        """
+            To calculate shortest forwarding path and install them into datapaths.
+
+        """
+#        datapath = msg.datapath
+#        ofproto = datapath.ofproto
+#        parser = datapath.ofproto_parser
+#        in_port = msg.match['in_port']
+#        if ip_src == "192.168.1.106" or ip_dst == "192.168.1.106":
+#            return
+#        eth_type = 0x86dd
+        result = self.get_sw(None, None, ip_src, ip_dst)
+        if result:
+            src_sw, dst_sw = result[0], result[1]
+            if dst_sw:
+                # Path has already calculated, just get it.
+                path = self.get_path(src_sw, dst_sw, weight=self.weight)
+                self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
+                inport = self.awareness.get_host_location(ip_src)
+                flow_info = (eth_type, ip_src, ip_dst, inport[1])
+                # install flow entries to datapath along side the path.
+                self.install_flow_paths_WIAPA(self.datapaths,
+                                  self.awareness.link_to_port,
+                                  self.awareness.access_table, path,
+                                  flow_info)
+#        if result[0] == None or result[1] == None:
+#            self.logger.info("flood ipv6")
+#            self.flood(msg)
+#        return
+    @set_ev_cls(ofp_event.EventWIAPAPathCalculation, MAIN_DISPATCHER)
+    def WIAPA_Path( self, ev ):
+        msg = ev.msg
+        src = msg['src']['ip']
+        dst = msg['dst']['ip']
+        eth_type = 0x0800
+        self.shortest_paths_install_v6(eth_type, src, dst)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -378,13 +628,20 @@ class ShortestForwarding(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        ipv6_pkt = pkt.get_protocol(ipv6.ipv6)
 
         if isinstance(arp_pkt, arp.arp):
             self.logger.debug("ARP processing")
             self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
-
         if isinstance(ip_pkt, ipv4.ipv4):
-            self.logger.debug("IPV4 processing")
+            self.logger.debug("IPV4 processing %s" % ip_pkt.dst)
+#		if ip_pkt.dst == "10.0.0.100":
+#			self.logger.debug("WIA-PA package in")
             if len(pkt.get_protocols(ethernet.ethernet)):
                 eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
                 self.shortest_forwarding(msg, eth_type, ip_pkt.src, ip_pkt.dst)
+        if isinstance(ipv6_pkt, ipv6.ipv6):
+            if len(pkt.get_protocols(ethernet.ethernet)):
+                self.logger.debug("IPV6 processing %s" % ipv6_pkt.dst)
+                eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
+                self.shortest_forwarding_v6(msg, eth_type, ipv6_pkt.src, ipv6_pkt.dst)

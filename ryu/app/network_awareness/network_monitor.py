@@ -1,19 +1,4 @@
-# Copyright (C) 2016 Li Cheng at Beijing University of Posts
-# and Telecommunications. www.muzixing.com
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-# implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# -*- coding:utf-8 -*-
 from __future__ import division
 import copy
 from operator import attrgetter
@@ -85,13 +70,13 @@ class NetworkMonitor(app_manager.RyuApp):
             self.stats['port'] = {}
             for dp in self.datapaths.values():
                 self.port_features.setdefault(dp.id, {})
-                self._request_stats(dp)
+                self._request_stats(dp)#发送获取交换机信息的请求
                 # refresh data.
                 self.capabilities = None
                 self.best_paths = None
             hub.sleep(setting.MONITOR_PERIOD)
             if self.stats['flow'] or self.stats['port']:
-                self.show_stat('flow')
+                self.show_stat('flow')#终端打印信息
                 self.show_stat('port')
                 hub.sleep(1)
 
@@ -242,12 +227,12 @@ class NetworkMonitor(app_manager.RyuApp):
         self.flow_speed.setdefault(dpid, {})
         for stat in sorted([flow for flow in body if flow.priority == 1],
                            key=lambda flow: (flow.match.get('in_port'),
-                                             flow.match.get('ipv4_dst'))):
+                                             flow.match.get('ipv4_dst'))):#将生产的列表先按照in_port排序，再按照ipv4_dst排序
             key = (stat.match['in_port'],  stat.match.get('ipv4_dst'),
                    stat.instructions[0].actions[0].port)
             value = (stat.packet_count, stat.byte_count,
                      stat.duration_sec, stat.duration_nsec)
-            self._save_stats(self.flow_stats[dpid], key, value, 5)
+            self._save_stats(self.flow_stats[dpid], key, value, 5)#存储获取信息，每个dpid的流表只保存最新的5组数据
 
             # Get flow's speed.
             pre = 0
@@ -256,7 +241,7 @@ class NetworkMonitor(app_manager.RyuApp):
             if len(tmp) > 1:
                 pre = tmp[-2][1]
                 period = self._get_period(tmp[-1][2], tmp[-1][3],
-                                          tmp[-2][2], tmp[-2][3])
+                                          tmp[-2][2], tmp[-2][3])#计算时间间隔
 
             speed = self._get_speed(self.flow_stats[dpid][key][-1][1],
                                     pre, period)
